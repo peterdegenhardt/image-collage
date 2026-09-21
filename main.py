@@ -5,12 +5,13 @@ Image Collage - fixed quadrant layout with correct scaling for fixed window.
 4 images placed in fixed quadrants of A4 landscape page.
 Each image is scaled to fit its quadrant without overlap.
 PDF export uses downscaled images (40%) and JPEG quality 70 to keep file size small.
+Additional tools: Text, Circle, Rectangle, Arrow.
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 import tkinterdnd2 as dnd2
-from PIL import Image, ImageTk, ImageReader
+from PIL import Image, ImageTk
 import os
 import json
 import io
@@ -19,6 +20,7 @@ import io
 try:
     from reportlab.pdfgen import canvas as reportlab_canvas
     from reportlab.lib.pagesizes import landscape, A4
+    from reportlab.lib.utils import ImageReader
     REPORTLAB_AVAILABLE = True
 except Exception:
     REPORTLAB_AVAILABLE = False
@@ -77,6 +79,10 @@ class ImageCollageApp:
         self.slots: list[dict | None] = [None] * MAX_IMAGES
         self.next_slot = 0
 
+        # Annotation state
+        self.current_tool = None  # None, 'text', 'circle', 'rect', 'arrow'
+        self.annotations = []     # list of dicts for drawn objects
+
         self._build_ui()
         self._bind_events()
         self._render_canvas()
@@ -107,6 +113,13 @@ class ImageCollageApp:
         ttk.Separator(side_frame).pack(fill=tk.X, pady=10)
         ttk.Button(side_frame, text="Beenden", command=self.root.quit).pack(fill=tk.X, pady=2)
 
+        # Tools
+        ttk.Label(side_frame, text="Werkzeuge", font=("Segoe UI", 10, "bold")).pack(pady=(10, 5))
+        ttk.Button(side_frame, text="Text", command=self._set_tool_text).pack(fill=tk.X, pady=2)
+        ttk.Button(side_frame, text="Kreis", command=self._set_tool_circle).pack(fill=tk.X, pady=2)
+        ttk.Button(side_frame, text="Rechteck", command=self._set_tool_rect).pack(fill=tk.X, pady=2)
+        ttk.Button(side_frame, text="Pfeil", command=self._set_tool_arrow).pack(fill=tk.X, pady=2)
+
         # Status bar
         self.status_var = tk.StringVar()
         self.status_var.set("Bereit – Bilder per Drag & Drop auf die Quadranten ziehen")
@@ -116,6 +129,24 @@ class ImageCollageApp:
     def _bind_events(self):
         self.canvas.drop_target_register(dnd2.DND_FILES)
         self.canvas.dnd_bind('<<Drop>>', self._on_drop)
+        self.canvas.bind("<Button-1>", self._on_canvas_click)
+
+    # ------------------- Tool selection -------------------
+    def _set_tool_text(self):
+        self.current_tool = 'text'
+        self.status_var.set("Werkzeug: Text – klicke auf die Fläche, um Text einzufügen")
+
+    def _set_tool_circle(self):
+        self.current_tool = 'circle'
+        self.status_var.set("Werkzeug: Kreis – klicke auf die Fläche, um einen Kreis einzufügen")
+
+    def _set_tool_rect(self):
+        self.current_tool = 'rect'
+        self.status_var.set("Werkzeug: Rechteck – klicke auf die Fläche, um ein Rechteck einzufügen")
+
+    def _set_tool_arrow(self):
+        self.current_tool = 'arrow'
+        self.status_var.set("Werkzeug: Pfeil – klicke auf die Fläche, um einen Pfeil einzufügen")
 
     # ------------------- Drag & Drop -------------------
     def _on_drop(self, event):
@@ -172,6 +203,71 @@ class ImageCollageApp:
         self.status_var.set(f"Bild {slot_idx + 1} platziert (Quadrant {slot_idx + 1}) - Skaliert auf {new_w}x{new_h} Bildschirmpx")
         self._render_canvas()
 
+    # ------------------- Canvas click for tools -------------------
+    def _on_canvas_click(self, event):
+        if self.current_tool is None:
+            return
+        x, y = event.x, event.y
+        if self.current_tool == 'text':
+            self._add_text_annotation(x, y)
+        elif self.current_tool == 'circle':
+            self._add_circle_annotation(x, y)
+        elif self.current_tool == 'rect':
+            self._add_rect_annotation(x, y)
+        elif self.current_tool == 'arrow':
+            self._add_arrow_annotation(x, y)
+        # keep tool active for multiple clicks
+        self._render_canvas()
+
+    def _add_text_annotation(self, x, y):
+        text = simpledialog.askstring("Text eingeben", "Bitte Text eingeben:", parent=self.root)
+        if text is None:
+            return
+        text = text.strip()
+        if not text:
+            return
+        self.annotations.append({
+            "type": "text",
+            "x": x,
+            "y": y,
+            "text": text,
+            "fontsize": 12
+        })
+        self.status_var.set(f"Text hinzugefügt: '{text}'")
+
+    def _add_circle_annotation(self, x, y):
+        radius = 15  # canvas pixels
+        self.annotations.append({
+            "type": "circle",
+            "x": x,
+            "y": y,
+            "r": radius
+        })
+        self.status_var.set(f"Kreis hinzugefügt (Radius {radius} px)")
+
+    def _add_rect_annotation(self, x, y):
+        w, h = 30, 20  # canvas pixels
+        self.annotations.append({
+            "type": "rect",
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h
+        })
+        self.status_var.set(f"Rechteck hinzugefügt ({w}x{h} px)")
+
+    def _add_arrow_annotation(self, x, y):
+        # simple fixed offset arrow
+        x2, y2 = x + 30, y + 30
+        self.annotations.append({
+            "type": "arrow",
+            "x1": x,
+            "y1": y,
+            "x2": x2,
+            "y2": y2
+        })
+        self.status_var.set(f"Pfeil hinzugefügt von ({x},{y}) nach ({x2},{y2})")
+
     # ------------------- Rendering -------------------
     def _render_canvas(self):
         self.canvas.delete("all")
@@ -193,6 +289,28 @@ class ImageCollageApp:
                 self.canvas.create_image(slot_cx, slot_cy,
                                          image=slot_data["photo"])
 
+        # Draw annotations
+        for ann in self.annotations:
+            if ann["type"] == "text":
+                self.canvas.create_text(ann["x"], ann["y"],
+                                        anchor="nw",
+                                        text=ann["text"],
+                                        font=("Segoe UI", ann["fontsize"]),
+                                        fill="black")
+            elif ann["type"] == "circle":
+                x0 = ann["x"] - ann["r"]
+                y0 = ann["y"] - ann["r"]
+                x1 = ann["x"] + ann["r"]
+                y1 = ann["y"] + ann["r"]
+                self.canvas.create_oval(x0, y0, x1, y1, outline="black", width=2)
+            elif ann["type"] == "rect":
+                self.canvas.create_rectangle(ann["x"], ann["y"],
+                                             ann["x"] + ann["w"], ann["y"] + ann["h"],
+                                             outline="black", width=2)
+            elif ann["type"] == "arrow":
+                self.canvas.create_line(ann["x1"], ann["y1"], ann["x2"], ann["y2"],
+                                        arrow=tk.LAST, fill="black", width=2)
+
         # Page info
         self.canvas.create_text(CANVAS_W_PX / 2, 15,
                                 text=f"DIN A4 Querformat (Scale: {CANVAS_SCALE:.3f})",
@@ -202,12 +320,14 @@ class ImageCollageApp:
     def _reset_slots(self):
         self.slots: list[dict | None] = [None] * MAX_IMAGES
         self.next_slot = 0
-        self.status_var.set("Alle Quadranten zurückgesetzt")
+        self.annotations.clear()
+        self.current_tool = None
+        self.status_var.set("Alle Quadranten zurückgesetzt, Werkzeuge deaktiviert")
         self._render_canvas()
 
     # ------------------- Project save/load -------------------
     def _save_project(self):
-        if all(s is None for s in self.slots):
+        if all(s is None for s in self.slots) and not self.annotations:
             messagebox.showinfo("Hinweis", "Nichts zu speichern.")
             return
         filepath = filedialog.asksaveasfilename(
@@ -219,7 +339,8 @@ class ImageCollageApp:
             return
         data = {
             "version": "1.0.0",
-            "slots": []
+            "slots": [],
+            "annotations": self.annotations
         }
         for slot in self.slots:
             if slot is None:
@@ -254,6 +375,8 @@ class ImageCollageApp:
         # Reset
         self.slots: list[dict | None] = [None] * MAX_IMAGES
         self.next_slot = 0
+        self.annotations = data.get("annotations", [])
+        self.current_tool = None
         for idx, slot_data in enumerate(data["slots"]):
             if slot_data is None:
                 continue
@@ -287,7 +410,7 @@ class ImageCollageApp:
             }
             if idx + 1 > self.next_slot:
                 self.next_slot = idx + 1
-        self.status_var.set(f"Projekt geladen: {len([s for s in self.slots if s is not None])} Bilder")
+        self.status_var.set(f"Projekt geladen: {len([s for s in self.slots if s is not None])} Bilder, {len(self.annotations)} Anmerkungen")
         self._render_canvas()
 
     # ------------------- PDF Export -------------------
@@ -296,7 +419,7 @@ class ImageCollageApp:
             messagebox.showerror("Fehlende Bibliothek",
                                  "Das Paket 'reportlab' ist nicht installiert.\nBitte installieren Sie es mit: pip install reportlab")
             return
-        if all(s is None for s in self.slots):
+        if all(s is None for s in self.slots) and not self.annotations:
             messagebox.showinfo("Hinweis", "Keine Bilder zum Exportieren vorhanden.")
             return
 
@@ -311,6 +434,19 @@ class ImageCollageApp:
         try:
             c = reportlab_canvas.Canvas(filepath, pagesize=landscape(A4))
             width, height = landscape(A4)  # in points
+            # Precompute conversion factor from canvas pixels to PDF points
+            # canvas_px -> page_px: / CANVAS_SCALE
+            # page_px -> mm: / MM_TO_PX
+            # mm -> points: * (72/25.4)
+            factor = (1 / CANVAS_SCALE) / MM_TO_PX * (72 / 25.4)
+
+            def canvas_to_pdf_x(x):
+                return x * factor
+
+            def canvas_to_pdf_y(y):
+                # PDF y origin bottom-left
+                return height - (y * factor)
+
             for slot_idx, slot in enumerate(self.slots):
                 if slot is None:
                     continue
@@ -349,6 +485,50 @@ class ImageCollageApp:
                 c.drawImage(img_reader, x1, y1,
                             width=img_w_pt, height=img_h_pt,
                             preserveAspectRatio=True, mask='auto')
+
+            # Draw annotations
+            for ann in self.annotations:
+                if ann["type"] == "text":
+                    x_pt = canvas_to_pdf_x(ann["x"])
+                    y_pt = canvas_to_pdf_y(ann["y"])
+                    c.setFont("Helvetica", ann["fontsize"])
+                    c.drawString(x_pt, y_pt, ann["text"])
+                elif ann["type"] == "circle":
+                    x_pt = canvas_to_pdf_x(ann["x"])
+                    y_pt = canvas_to_pdf_y(ann["y"])
+                    r_pt = ann["r"] * factor
+                    c.circle(x_pt, y_pt, r_pt)
+                elif ann["type"] == "rect":
+                    x_pt = canvas_to_pdf_x(ann["x"])
+                    y_pt = canvas_to_pdf_y(ann["y"])
+                    w_pt = ann["w"] * factor
+                    h_pt = ann["h"] * factor
+                    # rect draws lower-left corner; we have y_pt as top? Actually canvas_to_pdf_y gave bottom-left conversion for point.
+                    # Since we gave y_pt as bottom-left for a point, for rectangle we need to compute bottom-left.
+                    # Our ann["y"] is top-left in canvas. Convert top-left to PDF bottom-left: y_bottom = height - (y*factor) - h_pt
+                    y_bottom = height - (ann["y"] * factor) - h_pt
+                    c.rect(x_pt, y_bottom, w_pt, h_pt)
+                elif ann["type"] == "arrow":
+                    x1_pt = canvas_to_pdf_x(ann["x1"])
+                    y1_pt = canvas_to_pdf_y(ann["y1"])
+                    x2_pt = canvas_to_pdf_x(ann["x2"])
+                    y2_pt = canvas_to_pdf_y(ann["y2"])
+                    c.setLineWidth(1)
+                    c.line(x1_pt, y1_pt, x2_pt, y2_pt)
+                    # simple arrow head: draw two lines
+                    # compute angle
+                    import math
+                    angle = math.atan2(y2_pt - y1_pt, x2_pt - x1_pt)
+                    head_len = 5
+                    angle1 = angle + math.pi / 6
+                    angle2 = angle - math.pi / 6
+                    x3 = x2_pt - head_len * math.cos(angle1)
+                    y3 = y2_pt - head_len * math.sin(angle1)
+                    x4 = x2_pt - head_len * math.cos(angle2)
+                    y4 = y2_pt - head_len * math.sin(angle2)
+                    c.line(x2_pt, y2_pt, x3, y3)
+                    c.line(x2_pt, y2_pt, x4, y4)
+
             c.showPage()
             c.save()
             messagebox.showinfo("PDF exportiert",
