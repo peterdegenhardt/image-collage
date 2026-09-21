@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Image Collage - simple quadrant layout without overlap.
+Image Collage - fixed quadrant layout with proper scaling.
 4 images placed in fixed quadrants of A4 landscape page.
-No dragging - images stay centered in their quadrant.
+Each image is scaled to fit its quadrant without overlap.
 """
 
 import tkinter as tk
@@ -58,7 +58,7 @@ MAX_IMAGES = 4
 class ImageCollageApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Image Collage - 4 quadrants, no overlap")
+        self.root.title("Image Collage - 4 quadrants, scaled correctly")
         self.root.geometry(f"{CANVAS_W_PX + 200}x{CANVAS_H_PX + 50}")
         self.root.minsize(CANVAS_W_PX + 200, CANVAS_H_PX + 50)
 
@@ -133,9 +133,15 @@ class ImageCollageApp:
 
         # Scale image to fit quadrant (preserve aspect, do not upscale)
         img_w_px, img_h_px = pil_img.size
-        scale = min(qw / img_w_px, qh / img_h_px, 1.0)
-        new_w = int(img_w_px * scale)
-        new_h = int(img_h_px * scale)
+        # Calculate scale factors for width and height
+        scale_w = qw / img_w_px
+        scale_h = qh / img_h_px
+        # Use the smaller scale to ensure image fits completely within quadrant
+        scale = min(scale_w, scale_h, 1.0)  # 1.0 prevents upscaling
+        new_w = max(1, int(img_w_px * scale))  # Ensure at least 1 pixel
+        new_h = max(1, int(img_h_px * scale))
+        
+        # Create thumbnail for display
         thumb = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
         photo = ImageTk.PhotoImage(thumb)
 
@@ -147,9 +153,14 @@ class ImageCollageApp:
             "photo": photo,
             "display_w": new_w,
             "display_h": new_h,
+            # For debugging
+            "scale_used": scale,
+            "quadrant_px": (qw, qh),
+            "original_size": (img_w_px, img_h_px),
+            "scaled_size": (new_w, new_h)
         }
         self.next_slot += 1
-        self.status_var.set(f"Bild {slot_idx + 1} platziert (Quadrant {slot_idx + 1})")
+        self.status_var.set(f"Bild {slot_idx + 1} platziert (Quadrant {slot_idx + 1}) - Skaliert auf {new_w}x{new_h}")
         self._render_canvas()
 
     # ------------------- Rendering -------------------
@@ -171,7 +182,7 @@ class ImageCollageApp:
             # Draw image if present - centered in quadrant
             slot_data = self.slots[idx]
             if slot_data is not None and slot_data["photo"] is not None:
-                # Center of quadrant
+                # Center of quadrant in canvas coordinates
                 slot_cx = cx0 + cw / 2
                 slot_cy = cy0 + ch / 2
                 self.canvas.create_image(slot_cx, slot_cy,
@@ -254,9 +265,11 @@ class ImageCollageApp:
             qx0, qy0, qw, qh = QUADRANTS[idx]
             # Scale image to fit quadrant (preserve aspect, do not upscale)
             img_w_px, img_h_px = pil_img.size
-            scale = min(qw / img_w_px, qh / img_h_px, 1.0)
-            new_w = int(img_w_px * scale)
-            new_h = int(img_h_px * scale)
+            scale_w = qw / img_w_px
+            scale_h = qh / img_h_px
+            scale = min(scale_w, scale_h, 1.0)
+            new_w = max(1, int(img_w_px * scale))
+            new_h = max(1, int(img_h_px * scale))
             thumb = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
             photo = ImageTk.PhotoImage(thumb)
             self.slots[idx] = {
