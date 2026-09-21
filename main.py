@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Image Collage - four quadrants of an A4 landscape page:
-Top-left, Bottom-left, Top-right, Bottom-right.
-Each image is scaled to fit its quadrant while preserving aspect ratio.
-Fixed window size, drag & drop to add images, project save/load, PDF export.
+Image Collage - simple quadrant layout without overlap.
+4 images placed in fixed quadrants of A4 landscape page.
+No dragging - images stay centered in their quadrant.
 """
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import tkinterdnd2 as dnd2
-from PIL import Image, ImageTk, ImageDraw
+from PIL import Image, ImageTk
 import os
 import json
 
@@ -23,35 +22,27 @@ try:
 except Exception:
     REPORTLAB_AVAILABLE = False
 
-# ----------------------- Constants (mm) -----------------------
-MM_TO_INCH = 1 / 25.4
-INCH_TO_POINT = 72  # 1 inch = 72 pt
-DPI = 300  # for pixel conversion
-
+# ----------------------- Constants -----------------------
 # A4 portrait dimensions in mm
 A4_W_MM, A4_H_MM = 210, 297   # width, height portrait
+# Landscape: width = 297mm, height = 210mm
+LAND_W_MM, LAND_H_MM = A4_H_MM, A4_W_MM
 
 # Convert to pixels at 300 DPI
-MM_TO_PX = DPI * MM_TO_INCH  # pixels per mm
-A4_W_PX = int(A4_W_MM * MM_TO_PX)   # 2480
-A4_H_PX = int(A4_H_MM * MM_TO_PX)   # 3508
+MM_TO_PX = 300 / 25.4  # pixels per mm
+LAND_W_PX = int(LAND_W_MM * MM_TO_PX)   # 3508
+LAND_H_PX = int(LAND_H_MM * MM_TO_PX)   # 2480
 
-# For landscape A4: width = A4_H_PX, height = A4_W_PX
-PAGE_W_PX = A4_H_PX   # 3508
-PAGE_H_PX = A4_W_PX   # 2480
+# Split into quadrants (equal size)
+HALF_W = LAND_W_PX // 2
+HALF_H = LAND_H_PX // 2
 
-# Split into quadrants
-LEFT_W_PX = PAGE_W_PX // 2
-RIGHT_W_PX = PAGE_W_PX - LEFT_W_PX
-TOP_H_PX = PAGE_H_PX // 2
-BOTTOM_H_PX = PAGE_H_PX - TOP_H_PX
-
-# Slot definitions in page pixels (x0, y0, width, height)
-SLOTS_PX = [
-    (0, 0, LEFT_W_PX, TOP_H_PX),           # 0: top-left
-    (0, TOP_H_PX, LEFT_W_PX, BOTTOM_H_PX), # 1: bottom-left
-    (LEFT_W_PX, 0, RIGHT_W_PX, TOP_H_PX),  # 2: top-right
-    (LEFT_W_PX, TOP_H_PX, RIGHT_W_PX, BOTTOM_H_PX) # 3: bottom-right
+# Quadrants in page pixels (x0, y0, width, height)
+QUADRANTS = [
+    (0, 0, HALF_W, HALF_H),           # 0: top-left
+    (0, HALF_H, HALF_W, HALF_H),      # 1: bottom-left
+    (HALF_W, 0, HALF_W, HALF_H),      # 2: top-right
+    (HALF_W, HALF_H, HALF_W, HALF_H)  # 3: bottom-right
 ]
 
 # Fixed window size for the GUI (canvas)
@@ -59,10 +50,7 @@ CANVAS_W_PX = 900
 CANVAS_H_PX = 600
 
 # Scale to fit the whole A4 landscape page into the canvas
-CANVAS_SCALE = min(CANVAS_W_PX / PAGE_W_PX, CANVAS_H_PX / PAGE_H_PX)
-
-# Points conversion for PDF
-MM_TO_PT = INCH_TO_POINT * MM_TO_INCH
+CANVAS_SCALE = min(CANVAS_W_PX / LAND_W_PX, CANVAS_H_PX / LAND_H_PX)
 
 MAX_IMAGES = 4
 
@@ -70,18 +58,13 @@ MAX_IMAGES = 4
 class ImageCollageApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Image Collage – four quadrants of A4 landscape")
+        self.root.title("Image Collage - 4 quadrants, no overlap")
         self.root.geometry(f"{CANVAS_W_PX + 200}x{CANVAS_H_PX + 50}")
         self.root.minsize(CANVAS_W_PX + 200, CANVAS_H_PX + 50)
 
         # State: one dict per slot, or None
         self.slots: list[dict | None] = [None] * MAX_IMAGES
         self.next_slot = 0
-
-        # For optional dragging within a slot
-        self.dragging_slot = None
-        self.drag_start_x = 0
-        self.drag_start_y = 0
 
         self._build_ui()
         self._bind_events()
@@ -122,9 +105,6 @@ class ImageCollageApp:
     def _bind_events(self):
         self.canvas.drop_target_register(dnd2.DND_FILES)
         self.canvas.dnd_bind('<<Drop>>', self._on_drop)
-        self.canvas.bind("<ButtonPress-1>", self._on_canvas_click)
-        self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
-        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
 
     # ------------------- Drag & Drop -------------------
     def _on_drop(self, event):
@@ -149,11 +129,11 @@ class ImageCollageApp:
             return
 
         slot_idx = self.next_slot
-        slot_x0, slot_y0, slot_w_px, slot_h_px = SLOTS_PX[slot_idx]
+        qx0, qy0, qw, qh = QUADRANTS[slot_idx]
 
-        # Scale image to fit slot (preserve aspect, do not upscale)
+        # Scale image to fit quadrant (preserve aspect, do not upscale)
         img_w_px, img_h_px = pil_img.size
-        scale = min(slot_w_px / img_w_px, slot_h_px / img_h_px, 1.0)
+        scale = min(qw / img_w_px, qh / img_h_px, 1.0)
         new_w = int(img_w_px * scale)
         new_h = int(img_h_px * scale)
         thumb = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
@@ -167,60 +147,17 @@ class ImageCollageApp:
             "photo": photo,
             "display_w": new_w,
             "display_h": new_h,
-            # offset within slot for dragging (in canvas pixels)
-            "offset_x": 0,
-            "offset_y": 0,
         }
         self.next_slot += 1
         self.status_var.set(f"Bild {slot_idx + 1} platziert (Quadrant {slot_idx + 1})")
         self._render_canvas()
 
-    # ------------------- Canvas interaction (optional moving) -------------------
-    def _on_canvas_click(self, event):
-        slot_idx = self._get_slot_at_pos(event.x, event.y)
-        if slot_idx is not None and self.slots[slot_idx] is not None:
-            self.dragging_slot = slot_idx
-            self.drag_start_x = event.x
-            self.drag_start_y = event.y
-            self.status_var.set(f"Ziehe Bild {slot_idx + 1}")
-
-    def _on_canvas_drag(self, event):
-        if self.dragging_slot is None:
-            return
-        dx = event.x - self.drag_start_x
-        dy = event.y - self.drag_start_y
-        self.drag_start_x = event.x
-        self.drag_start_y = event.y
-        slot = self.slots[self.dragging_slot]
-        slot["offset_x"] += dx
-        slot["offset_y"] += dy
-        self._render_canvas()
-
-    def _on_canvas_release(self, event):
-        if self.dragging_slot is not None:
-            self.status_var.set(f"Bild {self.dragging_slot + 1} platziert")
-            self.dragging_slot = None
-
-    def _get_slot_at_pos(self, cx, cy):
-        """Return slot index (0-3) if canvas point (cx,cy) lies inside that slot's bounding box."""
-        # Convert canvas point to page coordinates (unscaled)
-        px = cx / CANVAS_SCALE
-        py = cy / CANVAS_SCALE
-        for idx, (x0, y0, w, h) in enumerate(SLOTS_PX):
-            if x0 <= px <= x0 + w and y0 <= py <= y0 + h:
-                return idx
-        return None
-
     # ------------------- Rendering -------------------
     def _render_canvas(self):
         self.canvas.delete("all")
 
-        # Draw page background (optional)
-        # self.canvas.create_rectangle(0, 0, PAGE_W_PX * CANVAS_SCALE, PAGE_H_PX * CANVAS_SCALE,
-        #                            outline="#dddddd", width=1)
-
-        # Draw slot borders (dashed) and labels
-        for idx, (x0, y0, w, h) in enumerate(SLOTS_PX):
+        # Draw quadrant borders (dashed) and labels
+        for idx, (x0, y0, w, h) in enumerate(QUADRANTS):
             cx0 = x0 * CANVAS_SCALE
             cy0 = y0 * CANVAS_SCALE
             cw = w * CANVAS_SCALE
@@ -231,27 +168,13 @@ class ImageCollageApp:
                                     anchor="nw", text=f"Quadrant {idx + 1}",
                                     fill="#555555", font=("Segoe UI", 9, "bold"))
 
-            # Draw image if present
+            # Draw image if present - centered in quadrant
             slot_data = self.slots[idx]
             if slot_data is not None and slot_data["photo"] is not None:
-                # Base center of slot
+                # Center of quadrant
                 slot_cx = cx0 + cw / 2
                 slot_cy = cy0 + ch / 2
-                # Apply offset
-                off_x = slot_data.get("offset_x", 0)
-                off_y = slot_data.get("offset_y", 0)
-                img_cx = slot_cx + off_x
-                img_cy = slot_cy + off_y
-                # Clamp to stay within slot (simple)
-                half_w = slot_data["display_w"] * CANVAS_SCALE / 2
-                half_h = slot_data["display_h"] * CANVAS_SCALE / 2
-                min_x = cx0 + half_w
-                max_x = cx0 + cw - half_w
-                min_y = cy0 + half_h
-                max_y = cy0 + ch - half_h
-                img_cx = max(min_x, min(max_x, img_cx))
-                img_cy = max(min_y, min(max_y, img_cy))
-                self.canvas.create_image(img_cx, img_cy,
+                self.canvas.create_image(slot_cx, slot_cy,
                                          image=slot_data["photo"])
 
         # Page info
@@ -288,8 +211,6 @@ class ImageCollageApp:
             else:
                 data["slots"].append({
                     "filepath": slot["filepath"],
-                    "offset_x": slot.get("offset_x", 0),
-                    "offset_y": slot.get("offset_y", 0),
                 })
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
@@ -329,11 +250,11 @@ class ImageCollageApp:
                 pil_img = Image.open(filepath)
             except Exception:
                 continue
-            # Determine slot dimensions to create thumbnail for display
-            slot_x0, slot_y0, slot_w_px, slot_h_px = SLOTS_PX[idx]
-            # Scale image to fit slot (preserve aspect, do not upscale)
+            # Determine quadrant dimensions to create thumbnail for display
+            qx0, qy0, qw, qh = QUADRANTS[idx]
+            # Scale image to fit quadrant (preserve aspect, do not upscale)
             img_w_px, img_h_px = pil_img.size
-            scale = min(slot_w_px / img_w_px, slot_h_px / img_h_px, 1.0)
+            scale = min(qw / img_w_px, qh / img_h_px, 1.0)
             new_w = int(img_w_px * scale)
             new_h = int(img_h_px * scale)
             thumb = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
@@ -345,8 +266,6 @@ class ImageCollageApp:
                 "photo": photo,
                 "display_w": new_w,
                 "display_h": new_h,
-                "offset_x": slot_data.get("offset_x", 0),
-                "offset_y": slot_data.get("offset_y", 0),
             }
             if idx + 1 > self.next_slot:
                 self.next_slot = idx + 1
@@ -385,26 +304,23 @@ class ImageCollageApp:
                 # Original size in pixels
                 img_w_px, img_h_px = pil_img.size
                 # Convert to points at 300 DPI
-                img_w_pt = img_w_px * MM_TO_PT
-                img_h_pt = img_h_px * MM_TO_PT
-                # Determine slot dimensions in points (based on our layout)
-                slot_x0_mm, slot_y0_mm, slot_w_mm, slot_h_mm = self._slot_to_mm(slot_idx)
-                slot_w_pt = slot_w_mm * MM_TO_PT
-                slot_h_pt = slot_h_mm * MM_TO_PT
-                # Scale to fit slot while preserving aspect ratio
-                scale = min(slot_w_pt / img_w_pt, slot_h_pt / img_h_pt, 1.0)
+                img_w_pt = img_w_px * (72 / 25.4)  # mm to points
+                img_h_pt = img_h_px * (72 / 25.4)
+                # Determine quadrant dimensions in points
+                qx0_mm, qy0_mm, qw_mm, qh_mm = self._quadrant_to_mm(slot_idx)
+                qw_pt = qw_mm * (72 / 25.4)
+                qh_pt = qh_mm * (72 / 25.4)
+                # Scale to fit quadrant while preserving aspect ratio
+                scale = min(qw_pt / img_w_pt, qh_pt / img_h_pt, 1.0)
                 img_w_pt *= scale
                 img_h_pt *= scale
-                # Position: slot origin in points (top-left of slot)
-                ox_pt = slot_x0_mm * MM_TO_PT
-                oy_pt = slot_y0_mm * MM_TO_PT
-                # In PDF, origin is bottom-left; we need to convert y from top
-                # So y1 = height - (oy_pt + img_h_pt/2) for center alignment
-                # We'll place image centered at (ox_pt + slot_w_pt/2, oy_pt + slot_h_pt/2)
-                center_x = ox_pt + slot_w_pt / 2
-                center_y = oy_pt + slot_h_pt / 2
+                # Position: center of quadrant
+                qx0_pt = qx0_mm * (72 / 25.4)
+                qy0_pt = qy0_mm * (72 / 25.4)
+                center_x = qx0_pt + qw_pt / 2
+                center_y = qy0_pt + qh_pt / 2
                 x1 = center_x - img_w_pt / 2
-                y1 = height - (center_y + img_h_pt / 2)  # flip y
+                y1 = height - (center_y + img_h_pt / 2)  # flip y for PDF
                 c.drawImage(ImageReader(pil_img), x1, y1,
                             width=img_w_pt, height=img_h_pt,
                             preserveAspectRatio=True, mask='auto')
@@ -416,9 +332,9 @@ class ImageCollageApp:
             messagebox.showerror("Exportfehler",
                                  f"Konnte PDF nicht erzeugen:\n{e}")
 
-    def _slot_to_mm(self, idx):
-        """Return (x0_mm, y0_mm, width_mm, height_mm) for given slot index."""
-        x0_px, y0_px, w_px, h_px = SLOTS_PX[idx]
+    def _quadrant_to_mm(self, idx):
+        """Return (x0_mm, y0_mm, width_mm, height_mm) for given quadrant index."""
+        x0_px, y0_px, w_px, h_px = QUADRANTS[idx]
         x0_mm = x0_px / MM_TO_PX
         y0_mm = y0_px / MM_TO_PX
         w_mm = w_px / MM_TO_PX
