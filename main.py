@@ -1,103 +1,131 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Image Collage - feste Fenstergröße, Bilder passen in die Ansicht.
-4 Bilder pro DIN A4 Blatt (Querformat). Drag & Drop zum Platzieren,
-automatisches neues Blatt bei Überschreitung, PDF-Export.
+Image Collage - layout according to spec:
+Left column: stacked A6 (top) and A5 (bottom).
+Right column: two images with same heights as the left column images,
+               filling the remaining width to reach A4 width.
+All images are scaled to fit within their slots while preserving aspect ratio.
+Fixed window size, drag & drop to add images, project save/load, PDF export.
 """
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import tkinterdnd2 as dnd2
-from PIL import Image, ImageTk, ImageDraw, ImageOps
+from PIL import Image, ImageTk, ImageDraw
 import os
 import json
 
-# Attempt to import reportlab for PDF export
+# Try to import reportlab for PDF export
 try:
     from reportlab.pdfgen import canvas as reportlab_canvas
     from reportlab.lib.pagesizes import landscape, A4
     from reportlab.lib.utils import ImageReader
     REPORTLAB_AVAILABLE = True
-except Exception:  # ImportError or any other
+except Exception:
     REPORTLAB_AVAILABLE = False
 
-# ── Konstanten ────────────────────────────────────────────────
-# DIN A4 bei 300 DPI (Portrait)
-A4_WIDTH_PX = 2480   # kurze Seite
-A4_HEIGHT_PX = 3508  # lange Seite
-# Wir wollen Querformat: Breite = lange Seite, Höhe = kurze Seite
-LANDSCAPE_WIDTH_PX = A4_HEIGHT_PX
-LANDSCAPE_HEIGHT_PX = A4_WIDTH_PX
+# ----------------------- Constants (mm) -----------------------
+MM_TO_INCH = 1 / 25.4
+INCH_TO_POINT = 72  # 1 inch = 72 pt
+DPI = 300  # for pixel conversion
 
-# feste Fenstergröße für die GUI
-CANVAS_W = 900   # Breite des Tkinter-Canvas
-CANVAS_H = 600   # Höhe des Tkinter-Canvas
+# Slot sizes in mm (as per spec)
+A6_W_MM, A6_H_MM = 105, 148   # A6
+A5_W_MM, A5_H_MM = 148, 210   # A5
+A4_W_MM, A4_H_MM = 210, 297   # A4 portrait
 
-# Skalierungsfaktor: passt das komplette A4-Blatt in das Canvas (mit Abstand)
-CANVAS_SCALE = min(CANVAS_W / LANDSCAPE_WIDTH_PX, CANVAS_H / LANDSCAPE_HEIGHT_PX)
-# Damit wir ein bisschen Rand haben, könnten wir leicht kleiner machen, aber halten wir es so.
+# Convert mm to pixels at 300 DPI
+MM_TO_PX = DPI * MM_TO_INCH  # pixels per mm
 
-# Umrechnung Pixel zu Punkten für PDF (300 DPI -> 1 Pixel = 1/300 in, 1 Punkt = 1/72 in)
-PX_TO_PT = 72 / 300.0  # = 0.24
+A6_W_PX = int(A6_W_MM * MM_TO_PX)
+A6_H_PX = int(A6_H_MM * MM_TO_PX)
+A5_W_PX = int(A5_W_MM * MM_TO_PX)
+A5_H_PX = int(A5_H_MM * MM_TO_PX)
+A4_W_PX = int(A4_W_MM * MM_TO_PX)
+A4_H_PX = int(A4_H_MM * MM_TO_PX)
 
-MAX_IMAGES_PER_PAGE = 4
+# Compute scale to fit the stacked left column within the A4 page
+max_left_width_px = max(A6_W_PX, A5_W_PX)
+total_left_height_px = A6_H_PX + A5_H_PX
+scale_w = A4_W_PX / max_left_width_px
+scale_h = A4_H_PX / total_left_height_px
+SCALE = min(scale_w, scale_h)  # uniform scaling factor for the whole layout
+
+# Scaled dimensions in px
+A6_W_S = int(A6_W_PX * SCALE)
+A6_H_S = int(A6_H_PX * SCALE)
+A5_W_S = int(A5_W_PX * SCALE)
+A5_H_S = int(A5_H_PX * SCALE)
+
+# Column widths in px
+LEFT_COL_W_PX = max(A6_W_S, A5_W_S)   # width of left column (widest image)
+RIGHT_COL_W_PX = A4_W_PX - LEFT_COL_W_PX  # remaining width for right column
+
+# Fixed window size for the GUI (canvas)
+CANVAS_W_PX = 900
+CANVAS_H_PX = 600
+
+# Scale to fit the whole A4 page into the canvas
+PAGE_W_PX = A4_W_PX
+PAGE_H_PX = A4_H_PX
+CANVAS_SCALE = min(CANVAS_W_PX / PAGE_W_PX, CANVAS_H_PX / PAGE_H_PX)
+
+# Points conversion for PDF
+MM_TO_PT = INCH_TO_POINT * MM_TO_INCH
+
+MAX_IMAGES = 4
 
 
 class ImageCollageApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Image Collage - 4 Bilder pro A4 Blatt (festes Fenster)")
-        self.root.geometry(f"{CANVAS_W + 200}x{CANVAS_H + 50}")  # etwas Platz für Seitenleiste
-        self.root.minsize(CANVAS_W + 200, CANVAS_H + 50)
+        self.root.title("Image Collage – A6/A5 left column, matching heights right column")
+        self.root.geometry(f"{CANVAS_W_PX + 200}x{CANVAS_H_PX + 50}")
+        self.root.minsize(CANVAS_W_PX + 200, CANVAS_H_PX + 50)
 
-        # Zustand
-        self.pages = [[]]          # Liste von Seiten, jede Seite ist Liste von Bild-Elementen
-        self.current_page_index = 0
-        self.page_elements = self.pages[self.current_page_index]
+        # State: one dict per slot, or None
+        self.slots: list[dict | None] = [None] * MAX_IMAGES  # 0:top-left,1:bottom-left,2:top-right,3:bottom-right
+        self.next_slot = 0
 
-        # Für Drag & Drop
-        self.dragging_item = None
+        # For optional dragging within a slot
+        self.dragging_slot = None
         self.drag_start_x = 0
         self.drag_start_y = 0
-        self.item_id_map = {}       # canvas item id -> index in page_elements
 
         self._build_ui()
         self._bind_events()
-        self._render_page()
+        self._render_canvas()
 
     def _build_ui(self):
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Canvas mit festen Abmessungen
+        # Canvas
         canvas_frame = ttk.LabelFrame(main_frame, text="DIN A4 Blatt (Querformat)")
-        canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0,5))
+        canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
 
         self.canvas = tk.Canvas(canvas_frame, bg="white",
-                                width=CANVAS_W, height=CANVAS_H)
+                                width=CANVAS_W_PX, height=CANVAS_H_PX)
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
-        # Seitenleiste
+        # Side panel
         side_frame = ttk.Frame(main_frame, width=200)
         side_frame.pack(side=tk.RIGHT, fill=tk.Y)
         side_frame.pack_propagate(False)
 
-        ttk.Label(side_frame, text="Steuerung", font=("Segoe UI", 10, "bold")).pack(pady=(0,10))
+        ttk.Label(side_frame, text="Steuerung", font=("Segoe UI", 10, "bold")).pack(pady=(0, 10))
 
-        ttk.Button(side_frame, text="Neue Seite", command=self._new_page).pack(fill=tk.X, pady=2)
-        ttk.Button(side_frame, text="Vorherige Seite", command=self._prev_page).pack(fill=tk.X, pady=2)
-        ttk.Button(side_frame, text="Nächste Seite", command=self._next_page).pack(fill=tk.X, pady=2)
-        ttk.Separator(side_frame).pack(fill=tk.X, pady=10)
+        ttk.Button(side_frame, text="Neue Seite (reset)", command=self._reset_slots).pack(fill=tk.X, pady=2)
         ttk.Button(side_frame, text="Als PDF speichern", command=self._save_pdf).pack(fill=tk.X, pady=2)
         ttk.Button(side_frame, text="Projekt speichern", command=self._save_project).pack(fill=tk.X, pady=2)
         ttk.Button(side_frame, text="Projekt laden", command=self._load_project).pack(fill=tk.X, pady=2)
         ttk.Separator(side_frame).pack(fill=tk.X, pady=10)
         ttk.Button(side_frame, text="Beenden", command=self.root.quit).pack(fill=tk.X, pady=2)
 
-        # Statusleiste
+        # Status bar
         self.status_var = tk.StringVar()
-        self.status_var.set("Bereit – Bilder per Drag & Drop auf die Fläche ziehen")
+        self.status_var.set("Bereit – Bilder per Drag & Drop auf die Slots ziehen")
         status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
@@ -108,7 +136,7 @@ class ImageCollageApp:
         self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
 
-    # ----------------- Drag & Drop -----------------
+    # ------------------- Drag & Drop -------------------
     def _on_drop(self, event):
         files = self.root.tk.splitlist(event.data)
         for f in files:
@@ -117,138 +145,161 @@ class ImageCollageApp:
             else:
                 messagebox.showwarning("Unsupported Dateityp",
                                        f"Die Datei {os.path.basename(f)} ist kein unterstütztes Bildformat.")
-        self._render_page()
+        self._render_canvas()
 
     def _add_image(self, filepath):
-        """Fügt ein Bild zur aktuellen Seite hinzu, erstellt bei Bedarf eine neue Seite."""
-        if len(self.page_elements) >= MAX_IMAGES_PER_PAGE:
-            self._new_page()
+        if self.next_slot >= MAX_IMAGES:
+            messagebox.showinfo("Info", "Alle vier Slots sind belegt. Bitte resetten oder ein Bild ersetzen.")
+            return
         try:
             pil_img = Image.open(filepath)
-            # Für die Anzeige erstellen wir ein Thumbnail, das wir skaliert darstellen.
-            # Wir behalten das Originalbild für den Export.
-            max_display_w = CANVAS_W / CANVAS_SCALE
-            max_display_h = CANVAS_H / CANVAS_SCALE
-            scale_factor = min(max_display_w / pil_img.width, max_display_h / pil_img.height, 1.0)
-            new_w = int(pil_img.width * scale_factor)
-            new_h = int(pil_img.height * scale_factor)
-            thumb = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            photo = ImageTk.PhotoImage(thumb)
         except Exception as e:
             messagebox.showerror("Fehler beim Laden",
                                  f"Konnte Bild nicht laden:\n{filepath}\n{e}")
             return
 
-        # Ausgangsposition: Mitte des A4-Blattes in Originalkoordinaten
-        orig_x = LANDSCAPE_WIDTH_PX / 2
-        orig_y = LANDSCAPE_HEIGHT_PX / 2
-
-        elem = {
+        slot_idx = self.next_slot
+        # Store original image and prepare thumbnail for display (will be resized to fit slot later)
+        self.slots[slot_idx] = {
             "filepath": filepath,
-            "pil_image": pil_img,          # Originalbild für Export
-            "thumb": thumb,                # Thumbnail für Anzeige (ggf. skaliert)
-            "photo": photo,
-            "orig_x": orig_x, "orig_y": orig_y,   # Position in Originalkoordinaten (Pixel bei 300 DPI)
-            "scale": 1.0,                  # zukünftiger Faktor für Größe (wenn wir skalieren wollen)
-            "angle": 0                     # Platzhalter für Drehung
+            "original": pil_img,
+            # placeholder; actual display image will be created in _render_canvas
+            "photo": None,
+            "display_w": 0,
+            "display_h": 0,
+            # offset within slot for dragging (in canvas pixels)
+            "offset_x": 0,
+            "offset_y": 0,
         }
-        self.page_elements.append(elem)
-        self.status_var.set(f"Bild hinzugefügt: {os.path.basename(filepath)}")
+        self.next_slot += 1
+        self.status_var.set(f"Bild {slot_idx + 1} platziert (Slot {slot_idx + 1})")
+        self._render_canvas()
 
-    # ----------------- Canvas Interaction -----------------
+    # ------------------- Canvas interaction (optional moving) -------------------
     def _on_canvas_click(self, event):
-        """Maustklick: prüft, ob auf ein Bild geklickt wurde, um es zu ziehen."""
-        item = self.canvas.find_closest(event.x, event.y)
-        if item:
-            idx = self.item_id_map.get(item[0])
-            if idx is not None:
-                self.dragging_item = idx
-                self.drag_start_x = event.x
-                self.drag_start_y = event.y
-                self.status_var.set(f"Ziehe Bild {idx+1} auf Seite {self.current_page_index+1}")
-
-    def _on_canvas_drag(self, event):
-        if self.dragging_item is not None:
-            dx = event.x - self.drag_start_x
-            dy = event.y - self.drag_start_y
+        slot_idx = self._get_slot_at_pos(event.x, event.y)
+        if slot_idx is not None and self.slots[slot_idx] is not None:
+            self.dragging_slot = slot_idx
             self.drag_start_x = event.x
             self.drag_start_y = event.y
-            elem = self.page_elements[self.dragging_item]
-            # Umrechne Canvas-Verschiebung in Originalkoordinaten
-            elem["orig_x"] += dx / CANVAS_SCALE
-            elem["orig_y"] += dy / CANVAS_SCALE
-            # Optional: Begrenzen auf A4-Blatt
-            elem["orig_x"] = max(0, min(LANDSCAPE_WIDTH_PX, elem["orig_x"]))
-            elem["orig_y"] = max(0, min(LANDSCAPE_HEIGHT_PX, elem["orig_y"]))
-            self._render_page()
+            self.status_var.set(f"Ziehe Bild {slot_idx + 1}")
+
+    def _on_canvas_drag(self, event):
+        if self.dragging_slot is None:
+            return
+        dx = event.x - self.drag_start_x
+        dy = event.y - self.drag_start_y
+        self.drag_start_x = event.x
+        self.drag_start_y = event.y
+        slot = self.slots[self.dragging_slot]
+        slot["offset_x"] += dx
+        slot["offset_y"] += dy
+        self._render_canvas()
 
     def _on_canvas_release(self, event):
-        if self.dragging_item is not None:
-            self.status_var.set(f"Bild {self.dragging_item+1} platziert")
-            self.dragging_item = None
+        if self.dragging_slot is not None:
+            self.status_var.set(f"Bild {self.dragging_slot + 1} platziert")
+            self.dragging_slot = None
 
-    # ----------------- Rendering -----------------
-    def _render_page(self):
-        """Rendert die aktuelle Seite auf dem Canvas mit Skalierung."""
+    def _get_slot_at_pos(self, cx, cy):
+        """Return slot index (0-3) if canvas point (cx,cy) lies inside that slot's bounding box."""
+        # Convert canvas point to page coordinates (unscaled)
+        px = cx / CANVAS_SCALE
+        py = cy / CANVAS_SCALE
+        # Compute slot origins in page coordinates (px) based on our layout
+        # Left column x0 = 0
+        # Top-left y0 = 0
+        # Bottom-left y0 = A6_H_S
+        # Right column x0 = LEFT_COL_W_PX
+        # Top-right y0 = 0
+        # Bottom-right y0 = A6_H_S
+        left_x0 = 0
+        left_y0_top = 0
+        left_y0_bottom = A6_H_S
+        right_x0 = LEFT_COL_W_PX
+        right_y0_top = 0
+        right_y0_bottom = A6_H_S
+
+        # Define slots as (x0, y0, w, h)
+        slots = [
+            (left_x0, left_y0_top, A6_W_S, A6_H_S),          # slot 0
+            (left_x0, left_y0_bottom, A5_W_S, A5_H_S),      # slot 1
+            (right_x0, right_y0_top, RIGHT_COL_W_PX, A6_H_S),# slot 2
+            (right_x0, right_y0_bottom, RIGHT_COL_W_PX, A5_H_S), # slot 3
+        ]
+        for idx, (x0, y0, w, h) in enumerate(slots):
+            if x0 <= px <= x0 + w and y0 <= py <= y0 + h:
+                return idx
+        return None
+
+    # ------------------- Rendering -------------------
+    def _render_canvas(self):
         self.canvas.delete("all")
-        self.item_id_map.clear()
 
-        # Zeichne das A4-Blatt als Kontur (skaliert)
-        self.canvas.create_rectangle(
-            0, 0,
-            LANDSCAPE_WIDTH_PX * CANVAS_SCALE,
-            LANDSCAPE_HEIGHT_PX * CANVAS_SCALE,
-            outline="#cccccc", width=2
-        )
+        # Draw page background (optional)
+        # self.canvas.create_rectangle(0, 0, PAGE_W_PX * CANVAS_SCALE, PAGE_H_PX * CANVAS_SCALE,
+        #                            outline="#dddddd", width=1)
 
-        for idx, elem in enumerate(self.page_elements):
-            # Position im Canvas
-            cx = elem["orig_x"] * CANVAS_SCALE
-            cy = elem["orig_y"] * CANVAS_SCALE
-            photo = elem["photo"]
-            image_id = self.canvas.create_image(cx, cy, image=photo, anchor=tk.CENTER)
-            self.item_id_map[image_id] = idx
+        # Compute origins for each slot in canvas coordinates
+        origins = [
+            (0, 0),                                            # slot0
+            (0, A6_H_S * CANVAS_SCALE),                       # slot1
+            (LEFT_COL_W_PX * CANVAS_SCALE, 0),                # slot2
+            (LEFT_COL_W_PX * CANVAS_SCALE, A6_H_S * CANVAS_SCALE), # slot3
+        ]
+        slot_sizes = [
+            (A6_W_S * CANVAS_SCALE, A6_H_S * CANVAS_SCALE),   # slot0
+            (A5_W_S * CANVAS_SCALE, A5_H_S * CANVAS_SCALE),   # slot1
+            (RIGHT_COL_W_PX * CANVAS_SCALE, A6_H_S * CANVAS_SCALE), # slot2
+            (RIGHT_COL_W_PX * CANVAS_SCALE, A5_H_S * CANVAS_SCALE), # slot3
+        ]
 
-            # Bildnummer
-            self.canvas.create_text(
-                cx, cy - 20 * CANVAS_SCALE,
-                text=str(idx+1),
-                fill="red",
-                font=("Segoe UI", max(10, int(10 * CANVAS_SCALE)), "bold")
-            )
+        # Draw slot borders (dashed) and labels
+        for idx, ((ox, oy), (w, h)) in enumerate(zip(origins, slot_sizes)):
+            self.canvas.create_rectangle(ox, oy, ox + w, oy + h,
+                                         outline="#888888", dash=(4, 2))
+            self.canvas.create_text(ox + 5, oy + 12,
+                                    anchor="nw", text=f"Slot {idx + 1}",
+                                    fill="#555555", font=("Segoe UI", 9, "bold"))
 
-        # Seiteninfo
-        self.canvas.create_text(
-            LANDSCAPE_WIDTH_PX * CANVAS_SCALE // 2,
-            20 * CANVAS_SCALE,
-            text=f"Seite {self.current_page_index+1} von {len(self.pages)}",
-            fill="gray",
-            font=("Segoe UI", max(10, int(10 * CANVAS_SCALE)))
-        )
+            # Draw image if present
+            slot_data = self.slots[idx]
+            if slot_data is not None and slot_data["photo"] is not None:
+                # Base center of slot
+                slot_cx = ox + w / 2
+                slot_cy = oy + h / 2
+                # Apply offset
+                off_x = slot_data.get("offset_x", 0)
+                off_y = slot_data.get("offset_y", 0)
+                img_cx = slot_cx + off_x
+                img_cy = slot_cy + off_y
+                # Clamp to stay within slot (simple)
+                half_w = slot_data["display_w"] * CANVAS_SCALE / 2
+                half_h = slot_data["display_h"] * CANVAS_SCALE / 2
+                min_x = ox + half_w
+                max_x = ox + w - half_w
+                min_y = oy + half_h
+                max_y = oy + h - half_h
+                img_cx = max(min_x, min(max_x, img_cx))
+                img_cy = max(min_y, min(max_y, img_cy))
+                self.canvas.create_image(img_cx, img_cy,
+                                         image=slot_data["photo"])
 
-    # ----------------- Seitenmanagement -----------------
-    def _new_page(self):
-        self.pages.append([])
-        self.current_page_index = len(self.pages) - 1
-        self.page_elements = self.pages[self.current_page_index]
-        self.status_var.set(f"Neue Seite erstellt (Seite {self.current_page_index+1})")
-        self._render_page()
+        # Page info
+        self.canvas.create_text(CANVAS_W_PX / 2, 15,
+                                text=f"DIN A4 Querformat (Scale: {CANVAS_SCALE:.3f})",
+                                fill="gray", font=("Segoe UI", 9))
 
-    def _prev_page(self):
-        if self.current_page_index > 0:
-            self.current_page_index -= 1
-            self.page_elements = self.pages[self.current_page_index]
-            self._render_page()
+    # ------------------- Slot management -------------------
+    def _reset_slots(self):
+        self.slots: list[dict | None] = [None] * MAX_IMAGES
+        self.next_slot = 0
+        self.status_var.set("Alle Slots zurückgesetzt")
+        self._render_canvas()
 
-    def _next_page(self):
-        if self.current_page_index < len(self.pages) - 1:
-            self.current_page_index += 1
-            self.page_elements = self.pages[self.current_page_index]
-            self._render_page()
-
-    # ----------------- Projekt speichern/laden -----------------
+    # ------------------- Project save/load -------------------
     def _save_project(self):
-        if not any(self.pages):
+        if all(s is None for s in self.slots):
             messagebox.showinfo("Hinweis", "Nichts zu speichern.")
             return
         filepath = filedialog.asksaveasfilename(
@@ -260,19 +311,17 @@ class ImageCollageApp:
             return
         data = {
             "version": "1.0.0",
-            "pages": []
+            "slots": []
         }
-        for page in self.pages:
-            page_data = []
-            for elem in page:
-                page_data.append({
-                    "filepath": elem["filepath"],
-                    "orig_x": elem["orig_x"],
-                    "orig_y": elem["orig_y"],
-                    "scale": elem.get("scale", 1.0),
-                    "angle": elem.get("angle", 0)
+        for slot in self.slots:
+            if slot is None:
+                data["slots"].append(None)
+            else:
+                data["slots"].append({
+                    "filepath": slot["filepath"],
+                    "offset_x": slot.get("offset_x", 0),
+                    "offset_y": slot.get("offset_y", 0),
                 })
-            data["pages"].append(page_data)
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
@@ -293,54 +342,62 @@ class ImageCollageApp:
         except Exception as e:
             messagebox.showerror("Fehler", f"Konnte Projektdatei nicht lesen:\n{e}")
             return
-        if "pages" not in data:
-            messagebox.showerror("Ungültiges Format", "Die Datei enthält keine 'pages'.")
+        if "slots" not in data or not isinstance(data["slots"], list):
+            messagebox.showerror("Ungültiges Format", "Erwartete 'slots' Liste.")
             return
-        self.pages = []
-        for page_data in data["pages"]:
-            page = []
-            for ed in page_data:
-                filepath = ed.get("filepath")
-                if not filepath or not os.path.exists(filepath):
-                    continue
-                try:
-                    pil_img = Image.open(filepath)
-                    # Erstelle Thumbnail für Anzeige (gleiche Logik wie beim Hinzufügen)
-                    max_display_w = CANVAS_W / CANVAS_SCALE
-                    max_display_h = CANVAS_H / CANVAS_SCALE
-                    scale_factor = min(max_display_w / pil_img.width, max_display_h / pil_img.height, 1.0)
-                    new_w = int(pil_img.width * scale_factor)
-                    new_h = int(pil_img.height * scale_factor)
-                    thumb = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                    photo = ImageTk.PhotoImage(thumb)
-                except Exception:
-                    continue
-                elem = {
-                    "filepath": filepath,
-                    "pil_image": pil_img,
-                    "thumb": thumb,
-                    "photo": photo,
-                    "orig_x": ed.get("orig_x", LANDSCAPE_WIDTH_PX / 2),
-                    "orig_y": ed.get("orig_y", LANDSCAPE_HEIGHT_PX / 2),
-                    "scale": ed.get("scale", 1.0),
-                    "angle": ed.get("angle", 0)
-                }
-                page.append(elem)
-            self.pages.append(page)
-        if not self.pages:
-            self.pages = [[]]
-        self.current_page_index = 0
-        self.page_elements = self.pages[self.current_page_index]
-        self._render_page()
-        messagebox.showinfo("Geladen", f"Projekt aus {os.path.basename(filepath)} geladen.")
+        # Reset
+        self.slots: list[dict | None] = [None] * MAX_IMAGES
+        self.next_slot = 0
+        for idx, slot_data in enumerate(data["slots"]):
+            if slot_data is None:
+                continue
+            if idx >= MAX_IMAGES:
+                break
+            filepath = slot_data.get("filepath")
+            if not filepath or not os.path.exists(filepath):
+                continue
+            try:
+                pil_img = Image.open(filepath)
+            except Exception:
+                continue
+            # Determine slot dimensions to create thumbnail for display
+            if idx == 0:
+                slot_w_px, slot_h_px = A6_W_S, A6_H_S
+            elif idx == 1:
+                slot_w_px, slot_h_px = A5_W_S, A5_H_S
+            elif idx == 2:
+                slot_w_px, slot_h_px = RIGHT_COL_W_PX, A6_H_S
+            else:  # idx == 3
+                slot_w_px, slot_h_px = RIGHT_COL_W_PX, A5_H_S
+            # Scale image to fit slot (preserve aspect, do not upscale)
+            img_w_px, img_h_px = pil_img.size
+            scale = min(slot_w_px / img_w_px, slot_h_px / img_h_px, 1.0)
+            new_w = int(img_w_px * scale)
+            new_h = int(img_h_px * scale)
+            thumb = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(thumb)
+            self.slots[idx] = {
+                "filepath": filepath,
+                "original": pil_img,
+                "thumb": thumb,
+                "photo": photo,
+                "display_w": new_w,
+                "display_h": new_h,
+                "offset_x": slot_data.get("offset_x", 0),
+                "offset_y": slot_data.get("offset_y", 0),
+            }
+            if idx + 1 > self.next_slot:
+                self.next_slot = idx + 1
+        self.status_var.set(f"Projekt geladen: {len([s for s in self.slots if s is not None])} Bilder")
+        self._render_canvas()
 
-    # ----------------- PDF Export -----------------
+    # ------------------- PDF Export -------------------
     def _save_pdf(self):
         if not REPORTLAB_AVAILABLE:
             messagebox.showerror("Fehlende Bibliothek",
                                  "Das Paket 'reportlab' ist nicht installiert.\nBitte installieren Sie es mit: pip install reportlab")
             return
-        if not any(self.pages):
+        if all(s is None for s in self.slots):
             messagebox.showinfo("Hinweis", "Keine Bilder zum Exportieren vorhanden.")
             return
 
@@ -354,38 +411,77 @@ class ImageCollageApp:
 
         try:
             c = reportlab_canvas.Canvas(filepath, pagesize=landscape(A4))
-            width, height = landscape(A4)  # in Punkten
-            for page_idx, page in enumerate(self.pages):
-                for elem in page:
-                    img_path = elem["filepath"]
-                    try:
-                        pil_img = Image.open(img_path)
-                    except Exception:
-                        continue
-                    # Originalbildgröße in Pixeln
-                    img_w_px, img_h_px = pil_img.size
-                    # Umrechnung zu Punkten bei 300 DPI
-                    img_w_pt = img_w_px * PX_TO_PT
-                    img_h_pt = img_h_px * PX_TO_PT
-                    # Skalierungsfaktor aus Element (falls je implementiert)
-                    scale = elem.get("scale", 1.0)
-                    img_w_pt *= scale
-                    img_h_pt *= scale
-                    # Position: orig_x, orig_y in Pixeln -> Punkte
-                    x_pt = elem["orig_x"] * PX_TO_PT
-                    y_pt = elem["orig_y"] * PX_TO_PT
-                    # Beim PDF liegt der Ursprung unten links; y muss von oben berechnet werden
-                    # Wir wollen, dass (x_pt, y_pt) der Mittelpunkt des Bildes ist.
-                    x1 = x_pt - img_w_pt / 2
-                    y1 = height - (y_pt + img_h_pt / 2)
-                    c.drawImage(ImageReader(pil_img), x1, y1,
-                                width=img_w_pt, height=img_h_pt,
-                                preserveAspectRatio=True, mask='auto')
-                if page_idx < len(self.pages) - 1:
-                    c.showPage()
+            width, height = landscape(A4)  # in points
+            for slot_idx, slot in enumerate(self.slots):
+                if slot is None:
+                    continue
+                img_path = slot["filepath"]
+                try:
+                    pil_img = Image.open(img_path)
+                except Exception:
+                    continue
+                # Original size in pixels
+                img_w_px, img_h_px = pil_img.size
+                # Convert to points at 300 DPI
+                img_w_pt = img_w_px * MM_TO_PT
+                img_h_pt = img_h_px * MM_TO_PT
+                # Determine slot dimensions in points (based on our layout)
+                if slot_idx == 0:
+                    slot_w_pt = A6_W_MM * MM_TO_PT
+                    slot_h_pt = A6_H_MM * MM_TO_PT
+                elif slot_idx == 1:
+                    slot_w_pt = A5_W_MM * MM_TO_PT
+                    slot_h_pt = A5_H_MM * MM_TO_PT
+                elif slot_idx == 2:
+                    slot_w_pt = (A4_W_MM - max(A6_W_MM, A5_W_MM)) * MM_TO_PT  # remaining width
+                    slot_h_pt = A6_H_MM * MM_TO_PT
+                else:  # slot_idx == 3
+                    slot_w_pt = (A4_W_MM - max(A6_W_MM, A5_W_MM)) * MM_TO_PT
+                    slot_h_pt = A5_H_MM * MM_TO_PT
+                # Scale to fit slot while preserving aspect ratio
+                scale = min(slot_w_pt / img_w_pt, slot_h_pt / img_h_pt, 1.0)
+                img_w_pt *= scale
+                img_h_pt *= scale
+                # Position: slot origin in points (top-left of slot)
+                # Compute slot origins in points (same logic as in pixel but using PT sizes)
+                # We'll compute origins in mm then convert to pt
+                origins_mm = []
+                # left column x0 = 0
+                # top-left y0 = 0
+                # bottom-left y0 = A6_H_MM
+                # right column x0 = max(A6_W_MM, A5_W_MM)
+                # top-right y0 = 0
+                # bottom-right y0 = A6_H_MM
+                left_x0_mm = 0
+                left_y0_top_mm = 0
+                left_y0_bottom_mm = A6_H_MM
+                right_x0_mm = max(A6_W_MM, A5_W_MM)
+                right_y0_top_mm = 0
+                right_y0_bottom_mm = A6_H_MM
+                if slot_idx == 0:
+                    ox_mm, oy_mm = left_x0_mm, left_y0_top_mm
+                elif slot_idx == 1:
+                    ox_mm, oy_mm = left_x0_mm, left_y0_bottom_mm
+                elif slot_idx == 2:
+                    ox_mm, oy_mm = right_x0_mm, right_y0_top_mm
+                else:
+                    ox_mm, oy_mm = right_x0_mm, right_y0_bottom_mm
+                ox_pt = ox_mm * MM_TO_PT
+                oy_pt = oy_mm * MM_TO_PT
+                # In PDF, origin is bottom-left; we need to convert y from top
+                # So y1 = height - (oy_pt + img_h_pt/2) for center alignment
+                # We'll place image centered at (ox_pt + slot_w_pt/2, oy_pt + slot_h_pt/2)
+                center_x = ox_pt + slot_w_pt / 2
+                center_y = oy_pt + slot_h_pt / 2
+                x1 = center_x - img_w_pt / 2
+                y1 = height - (center_y + img_h_pt / 2)  # flip y
+                c.drawImage(ImageReader(pil_img), x1, y1,
+                            width=img_w_pt, height=img_h_pt,
+                            preserveAspectRatio=True, mask='auto')
+            c.showPage()
             c.save()
             messagebox.showinfo("PDF exportiert",
-                                f"PDF gespeichert unter:\n{filepath}\nSeiten: {len(self.pages)}")
+                                f"PDF gespeichert unter:\n{filepath}\nSeiten: 1")
         except Exception as e:
             messagebox.showerror("Exportfehler",
                                  f"Konnte PDF nicht erzeugen:\n{e}")
