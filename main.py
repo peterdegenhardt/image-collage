@@ -10,7 +10,7 @@ PDF export uses downscaled images (40%) and JPEG quality 70 to keep file size sm
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import tkinterdnd2 as dnd2
-from PIL import Image, ImageTk, ImageReader
+from PIL import Image, ImageTk
 import os
 import json
 import io
@@ -19,6 +19,7 @@ import io
 try:
     from reportlab.pdfgen import canvas as reportlab_canvas
     from reportlab.lib.pagesizes import landscape, A4
+    from reportlab.lib.utils import ImageReader   # ImageReader ist eine ReportLab-Klasse, NICHT Pillow!
     REPORTLAB_AVAILABLE = True
 except Exception:
     REPORTLAB_AVAILABLE = False
