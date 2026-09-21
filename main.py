@@ -4,20 +4,21 @@
 Image Collage - fixed quadrant layout with correct scaling for fixed window.
 4 images placed in fixed quadrants of A4 landscape page.
 Each image is scaled to fit its quadrant without overlap.
+PDF export uses downscaled images (40%) and JPEG quality 70 to keep file size small.
 """
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import tkinterdnd2 as dnd2
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageReader
 import os
 import json
+import io
 
 # Try to import reportlab for PDF export
 try:
     from reportlab.pdfgen import canvas as reportlab_canvas
     from reportlab.lib.pagesizes import landscape, A4
-    from reportlab.lib.utils import ImageReader
     REPORTLAB_AVAILABLE = True
 except Exception:
     REPORTLAB_AVAILABLE = False
@@ -59,6 +60,10 @@ QUADRANTS = [
 ]
 
 MAX_IMAGES = 4
+
+# PDF export settings (to keep file size small)
+PDF_EXPORT_SCALE = 0.4      # downscale to 40% of original size (like CAQ)
+PDF_JPEG_QUALITY = 70       # JPEG quality for embedded images
 
 
 class ImageCollageApp:
@@ -314,16 +319,23 @@ class ImageCollageApp:
                     pil_img = Image.open(img_path)
                 except Exception:
                     continue
-                # Original size in pixels
+                # Downscale for PDF to keep file size small
                 img_w_px, img_h_px = pil_img.size
-                # Convert to points at 300 DPI
-                img_w_pt = img_w_px * (72 / 25.4)  # mm to points
-                img_h_pt = img_h_px * (72 / 25.4)
+                small_w = max(1, int(img_w_px * PDF_EXPORT_SCALE))
+                small_h = max(1, int(img_h_px * PDF_EXPORT_SCALE))
+                img_small = pil_img.resize((small_w, small_h), Image.Resampling.LANCZOS)
+                # Convert to JPEG bytes with quality
+                buf = io.BytesIO()
+                img_small.convert('RGB').save(buf, format='JPEG', quality=PDF_JPEG_QUALITY)
+                buf.seek(0)
+                img_reader = ImageReader(buf)
                 # Determine quadrant dimensions in points
                 qx0_mm, qy0_mm, qw_mm, qh_mm = self._quadrant_to_mm(slot_idx)
                 qw_pt = qw_mm * (72 / 25.4)
                 qh_pt = qh_mm * (72 / 25.4)
-                # Scale to fit quadrant while preserving aspect ratio
+                # Scale to fit quadrant while preserving aspect ratio (using downscaled image size)
+                img_w_pt = small_w * (72 / 25.4)
+                img_h_pt = small_h * (72 / 25.4)
                 scale = min(qw_pt / img_w_pt, qh_pt / img_h_pt, 1.0)
                 img_w_pt *= scale
                 img_h_pt *= scale
@@ -334,7 +346,7 @@ class ImageCollageApp:
                 center_y = qy0_pt + qh_pt / 2
                 x1 = center_x - img_w_pt / 2
                 y1 = height - (center_y + img_h_pt / 2)  # flip y for PDF
-                c.drawImage(ImageReader(pil_img), x1, y1,
+                c.drawImage(img_reader, x1, y1,
                             width=img_w_pt, height=img_h_pt,
                             preserveAspectRatio=True, mask='auto')
             c.showPage()
