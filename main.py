@@ -52,13 +52,13 @@ scale_w = A4_W_PX / max_left_width_px
 scale_h = A4_H_PX / total_left_height_px
 SCALE = min(scale_w, scale_h)  # uniform scaling factor for the whole layout
 
-# Scaled dimensions in px
+# Scaled dimensions in px (still in page/pixel units before canvas scaling)
 A6_W_S = int(A6_W_PX * SCALE)
 A6_H_S = int(A6_H_PX * SCALE)
 A5_W_S = int(A5_W_PX * SCALE)
 A5_H_S = int(A5_H_PX * SCALE)
 
-# Column widths in px
+# Column widths in px (page units)
 LEFT_COL_W_PX = max(A6_W_S, A5_W_S)   # width of left column (widest image)
 RIGHT_COL_W_PX = A4_W_PX - LEFT_COL_W_PX  # remaining width for right column
 
@@ -159,14 +159,32 @@ class ImageCollageApp:
             return
 
         slot_idx = self.next_slot
-        # Store original image and prepare thumbnail for display (will be resized to fit slot later)
+        # Determine slot dimensions in page units (before canvas scaling)
+        if slot_idx == 0:
+            slot_w_px, slot_h_px = A6_W_S, A6_H_S
+        elif slot_idx == 1:
+            slot_w_px, slot_h_px = A5_W_S, A5_H_S
+        elif slot_idx == 2:
+            slot_w_px, slot_h_px = RIGHT_COL_W_PX, A6_H_S
+        else:  # idx == 3
+            slot_w_px, slot_h_px = RIGHT_COL_W_PX, A5_H_S
+
+        # Scale image to fit slot (preserve aspect, do not upscale)
+        img_w_px, img_h_px = pil_img.size
+        scale = min(slot_w_px / img_w_px, slot_h_px / img_h_px, 1.0)
+        new_w = int(img_w_px * scale)
+        new_h = int(img_h_px * scale)
+        thumb = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        photo = ImageTk.PhotoImage(thumb)
+
+        # Store original image and prepared thumbnail for display
         self.slots[slot_idx] = {
             "filepath": filepath,
             "original": pil_img,
-            # placeholder; actual display image will be created in _render_canvas
-            "photo": None,
-            "display_w": 0,
-            "display_h": 0,
+            "thumb": thumb,
+            "photo": photo,
+            "display_w": new_w,
+            "display_h": new_h,
             # offset within slot for dragging (in canvas pixels)
             "offset_x": 0,
             "offset_y": 0,
