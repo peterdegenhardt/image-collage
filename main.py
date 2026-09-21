@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Image Collage - fixed quadrant layout with proper scaling.
+Image Collage - fixed quadrant layout with correct scaling for fixed window.
 4 images placed in fixed quadrants of A4 landscape page.
 Each image is scaled to fit its quadrant without overlap.
 """
@@ -38,7 +38,7 @@ HALF_W = LAND_W_PX // 2
 HALF_H = LAND_H_PX // 2
 
 # Quadrants in page pixels (x0, y0, width, height)
-QUADRANTS = [
+QUADRANTS_PX = [
     (0, 0, HALF_W, HALF_H),           # 0: top-left
     (0, HALF_H, HALF_W, HALF_H),      # 1: bottom-left
     (HALF_W, 0, HALF_W, HALF_H),      # 2: top-right
@@ -52,13 +52,19 @@ CANVAS_H_PX = 600
 # Scale to fit the whole A4 landscape page into the canvas
 CANVAS_SCALE = min(CANVAS_W_PX / LAND_W_PX, CANVAS_H_PX / LAND_H_PX)
 
+# Quadrants in canvas (screen) pixels
+QUADRANTS = [
+    (x0 * CANVAS_SCALE, y0 * CANVAS_SCALE, w * CANVAS_SCALE, h * CANVAS_SCALE)
+    for (x0, y0, w, h) in QUADRANTS_PX
+]
+
 MAX_IMAGES = 4
 
 
 class ImageCollageApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Image Collage - 4 quadrants, scaled correctly")
+        self.root.title("Image Collage - 4 quadrants, correct scaling")
         self.root.geometry(f"{CANVAS_W_PX + 200}x{CANVAS_H_PX + 50}")
         self.root.minsize(CANVAS_W_PX + 200, CANVAS_H_PX + 50)
 
@@ -133,15 +139,13 @@ class ImageCollageApp:
 
         # Scale image to fit quadrant (preserve aspect, do not upscale)
         img_w_px, img_h_px = pil_img.size
-        # Calculate scale factors for width and height
         scale_w = qw / img_w_px
         scale_h = qh / img_h_px
-        # Use the smaller scale to ensure image fits completely within quadrant
         scale = min(scale_w, scale_h, 1.0)  # 1.0 prevents upscaling
-        new_w = max(1, int(img_w_px * scale))  # Ensure at least 1 pixel
+        new_w = max(1, int(img_w_px * scale))
         new_h = max(1, int(img_h_px * scale))
         
-        # Create thumbnail for display
+        # Create thumbnail for display (already in screen pixels)
         thumb = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
         photo = ImageTk.PhotoImage(thumb)
 
@@ -160,7 +164,7 @@ class ImageCollageApp:
             "scaled_size": (new_w, new_h)
         }
         self.next_slot += 1
-        self.status_var.set(f"Bild {slot_idx + 1} platziert (Quadrant {slot_idx + 1}) - Skaliert auf {new_w}x{new_h}")
+        self.status_var.set(f"Bild {slot_idx + 1} platziert (Quadrant {slot_idx + 1}) - Skaliert auf {new_w}x{new_h} Bildschirmpx")
         self._render_canvas()
 
     # ------------------- Rendering -------------------
@@ -169,22 +173,18 @@ class ImageCollageApp:
 
         # Draw quadrant borders (dashed) and labels
         for idx, (x0, y0, w, h) in enumerate(QUADRANTS):
-            cx0 = x0 * CANVAS_SCALE
-            cy0 = y0 * CANVAS_SCALE
-            cw = w * CANVAS_SCALE
-            ch = h * CANVAS_SCALE
-            self.canvas.create_rectangle(cx0, cy0, cx0 + cw, cy0 + ch,
+            self.canvas.create_rectangle(x0, y0, x0 + w, y0 + h,
                                          outline="#888888", dash=(4, 2))
-            self.canvas.create_text(cx0 + 5, cy0 + 12,
+            self.canvas.create_text(x0 + 5, y0 + 12,
                                     anchor="nw", text=f"Quadrant {idx + 1}",
                                     fill="#555555", font=("Segoe UI", 9, "bold"))
 
             # Draw image if present - centered in quadrant
             slot_data = self.slots[idx]
             if slot_data is not None and slot_data["photo"] is not None:
-                # Center of quadrant in canvas coordinates
-                slot_cx = cx0 + cw / 2
-                slot_cy = cy0 + ch / 2
+                # Center of quadrant
+                slot_cx = x0 + w / 2
+                slot_cy = y0 + h / 2
                 self.canvas.create_image(slot_cx, slot_cy,
                                          image=slot_data["photo"])
 
@@ -347,7 +347,7 @@ class ImageCollageApp:
 
     def _quadrant_to_mm(self, idx):
         """Return (x0_mm, y0_mm, width_mm, height_mm) for given quadrant index."""
-        x0_px, y0_px, w_px, h_px = QUADRANTS[idx]
+        x0_px, y0_px, w_px, h_px = QUADRANTS_PX[idx]
         x0_mm = x0_px / MM_TO_PX
         y0_mm = y0_px / MM_TO_PX
         w_mm = w_px / MM_TO_PX
